@@ -3276,29 +3276,51 @@
                 }
             }
 
-            const btn = document.getElementById('btn-kirim-chat');
-            btn.disabled = true;
-            try {
-                const payload = {
-                    text,
-                    senderId: currentUserId,
-                    senderName: currentUserData.username,
-                    senderRole: currentUserData.role,
-                    timestamp: Date.now()
-                };
-                if (chatReplyToId) payload.replyTo = chatReplyToId;
-                if (chatAttachAnnouncementId) payload.attachedAnnouncementId = chatAttachAnnouncementId;
-                const attachedAnnIdForAi = chatAttachAnnouncementId; // simpan dulu, sebelum cancelChatAttach() mengosongkannya
-                const newMsgRef = await push(ref(db, `chats/${currentViewedClassId}`), payload);
-                cancelChatReply();
-                cancelChatAttach();
-                input.value = '';
+            const payload = {
+                text,
+                senderId: currentUserId,
+                senderName: currentUserData.username,
+                senderRole: currentUserData.role,
+                timestamp: Date.now()
+            };
+            if (chatReplyToId) payload.replyTo = chatReplyToId;
+            if (chatAttachAnnouncementId) payload.attachedAnnouncementId = chatAttachAnnouncementId;
+
+            // Simpan dulu semua yang akan dikosongkan, untuk dikembalikan kalau pengiriman gagal.
+            const attachedAnnIdForAi = chatAttachAnnouncementId;
+            const sentClassId = currentViewedClassId;
+            const sentSenderName = currentUserData.username;
+            const draftReplyId = chatReplyToId, draftReplyName = chatReplyToName;
+
+            // Firebase langsung memunculkan pesan di bubble chat (cache lokal) begitu ditulis, TAPI promise-nya
+            // baru selesai setelah server mengonfirmasi (bisa lama kalau koneksi lambat/offline). Dulu kolom input
+            // baru dikosongkan setelah konfirmasi itu, jadi pesan sudah tampil di chat sementara teksnya masih di
+            // kolom input. Sekarang kolom input dikosongkan SEGERA saat pesan tampil; konfirmasi server ditunggu
+            // di latar belakang.
+            const newMsgRef = push(ref(db, `chats/${sentClassId}`));
+            const writePromise = set(newMsgRef, payload);
+
+            cancelChatReply();
+            cancelChatAttach();
+            input.value = '';
+            // Field overlay keyboard (mobile) punya salinan teks sendiri; minta ia ikut dikosongkan.
+            input.dispatchEvent(new CustomEvent('composer-value-changed', { bubbles: true }));
+
+            writePromise.then(() => {
                 if (containsEduAiTrigger(text)) {
-                    handleEduAiTrigger(text, currentViewedClassId, currentUserData.username, newMsgRef.key, attachedAnnIdForAi, payload.timestamp); // dijalankan async, tidak menunggu (tidak memblokir UI)
+                    handleEduAiTrigger(text, sentClassId, sentSenderName, newMsgRef.key, attachedAnnIdForAi, payload.timestamp); // dijalankan async, tidak menunggu (tidak memblokir UI)
                 }
-            } finally {
-                btn.disabled = false;
-            }
+            }).catch((err) => {
+                // Pengiriman benar-benar ditolak (mis. aturan database) -> kembalikan teks supaya tidak hilang.
+                console.error('Gagal mengirim pesan obrolan:', err);
+                if (!input.value) {
+                    input.value = text;
+                    if (draftReplyId && !chatReplyToId) { chatReplyToId = draftReplyId; chatReplyToName = draftReplyName; showChatReplyIndicator(); }
+                    if (attachedAnnIdForAi && !chatAttachAnnouncementId) { chatAttachAnnouncementId = attachedAnnIdForAi; showChatAttachPreview(); }
+                    input.dispatchEvent(new CustomEvent('composer-value-changed', { bubbles: true }));
+                }
+                showToast('Pesan gagal terkirim. Coba lagi.');
+            });
         });
 
         document.getElementById('input-chat').addEventListener('keydown', (e) => {
@@ -6423,6 +6445,12 @@
                     setOverlayBottom(keyboardOpen ? kbHeight : 0);
                 }
             }
+
+            // Kode chat mengubah value field asli secara programatik (mis. dikosongkan setelah kirim) ->
+            // salin ke field overlay supaya teks lama tidak tertinggal di layar.
+            document.addEventListener('composer-value-changed', (e) => {
+                if (overlayField && composerOpen && e.target === activeField) overlayField.value = activeField.value;
+            });
 
             document.addEventListener('focusin', (e) => {
                 const el = e.target;
