@@ -1814,8 +1814,10 @@
         // ================= STATE FITUR EduAI (ASISTEN AI) =================
         const EDUAI_SENDER_ID = 'eduai-bot';
         const EDUAI_TRIGGER = '@EduAI';
-        let eduAiIsTyping = false; // tetap true selama menunggu jawaban, walau sidebar chat ditutup lalu dibuka lagi
-        let eduAiStreamingMessageId = null; // id pesan EduAI yang teksnya sedang bertambah (streaming) saat ini, kalau ada
+        // Id pesan-pesan EduAI yang sedang di-generate OLEH PERANGKAT INI. Berupa Set (bukan satu id) supaya
+        // beberapa pertanyaan "@EduAI" beruntun tidak saling menimpa status satu sama lain.
+        const eduAiActiveStreams = new Set();
+        const EDUAI_STALE_MS = 90 * 1000; // pesan "generating" tanpa update selama ini dianggap terhenti (mis. HP pengirim mati)
         let chatPausedReplyName = null;
         let chatPausedAttachId = null;
         let currentAnnShareMenuId = null; // id materi yang sedang dibuka menu titik-tiga "Bagikan ke Obrolan"-nya
@@ -2522,9 +2524,12 @@
                 const newCache = snap.exists() ? snap.val() : {};
                 const prevIds = new Set(Object.keys(chatMessagesCache));
                 const hasNewMessage = Object.keys(newCache).some(id => !prevIds.has(id));
-                // Ikut paksa scroll ke bawah selagi ada pesan EduAI yang sedang "mengalir" (streaming),
-                // supaya siapapun yang membuka obrolan tetap mengikuti teks yang terus bertambah.
-                const isStreamingNow = !!(eduAiStreamingMessageId && newCache[eduAiStreamingMessageId]);
+                // Selagi ada pesan EduAI yang sedang "mengalir" (streaming), ikuti teksnya ke bawah - tapi hanya
+                // kalau pembaca memang sedang berada di dasar obrolan, supaya tidak menyeret orang yang sedang
+                // membaca pesan lama. Pesan baru (siapa pun pengirimnya) tetap menggulung ke bawah seperti biasa.
+                const chatBox = document.getElementById('chat-messages-container');
+                const nearBottom = !chatBox || (chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight) < 140;
+                const isStreamingNow = nearBottom && Object.values(newCache).some(m => m && m.generating && !m.deleted);
                 chatMessagesCache = newCache;
                 updateChatUnreadBadge();
                 if (chatSidebarEl.classList.contains('open')) {
@@ -2576,7 +2581,6 @@
             if (ids.length === 0) {
                 container.innerHTML = '<p style="text-align:center; color:var(--text-muted); padding: 30px 0;">Belum ada obrolan. Mulai percakapan pertama di kelas ini!</p>';
                 chatJustOpened = false;
-                if (eduAiIsTyping) container.insertAdjacentHTML('beforeend', eduAiTypingBubbleHtml());
                 return;
             }
 
@@ -2592,7 +2596,6 @@
             }
 
             container.innerHTML = ids.map(id => renderChatBubble(id, chatMessagesCache[id])).join('');
-            if (eduAiIsTyping) container.insertAdjacentHTML('beforeend', eduAiTypingBubbleHtml());
 
             requestAnimationFrame(() => {
                 if (chatJustOpened) {
@@ -2628,6 +2631,14 @@
                     ? `Pesan ini telah dihapus oleh guru ${escapeHtml(m.deletedByName || '')}`
                     : 'Pesan ini telah dihapus';
                 bodyHtml = `<div class="chat-text chat-text-deleted">🚫 ${delNote}</div>`;
+            } else if (isAiSender && m.generating && !eduAiActiveStreams.has(id) && (Date.now() - (m.lastUpdate || m.timestamp || 0)) > EDUAI_STALE_MS) {
+                // Pesan EduAI yang ditandai "generating" tapi sudah lama tidak ada update (perangkat yang
+                // menjalankannya mati/keluar) -> tampilkan apa adanya supaya tidak menggantung selamanya.
+                const partial = (m.text && String(m.text).trim()) ? `<div class="chat-text">${linkifyText(m.text)}</div>` : '';
+                bodyHtml = `${partial}<div class="chat-text eduai-typing-dots">⚠️ Respons EduAI terhenti sebelum selesai.</div><div class="chat-meta">${time}</div>`;
+            } else if (isAiSender && m.generating && !(m.text && String(m.text).trim())) {
+                // Bubble EduAI yang baru "dipesan tempatnya" dan belum menerima teks pertama.
+                bodyHtml = `<div class="chat-text eduai-typing-dots">EduAI sedang mengetik…</div>`;
             } else {
                 const editedTag = m.edited ? ' <span class="comment-edited-tag">(diedit)</span>' : '';
                 const hasText = !!(m.text && String(m.text).trim());
@@ -2805,7 +2816,7 @@
             // ke AI sebagai konteks (pesannya sendiri tetap ada & terlihat di obrolan kelas).
             const sessionStart = isAiSessionRowActive(currentAiSession) ? currentAiSession.startedAt : correctedNow();
             return Object.values(chatMessagesCache)
-                .filter(m => !m.deleted && m.text && String(m.text).trim())
+                .filter(m => !m.deleted && !m.generating && m.text && String(m.text).trim())
                 .filter(m => (m.timestamp || 0) >= sessionStart)
                 .filter(m => m.senderId === EDUAI_SENDER_ID || containsEduAiTrigger(m.text))
                 .sort((a, b) => a.timestamp - b.timestamp)
@@ -2813,35 +2824,6 @@
                     role: m.senderId === EDUAI_SENDER_ID ? 'ai' : 'user',
                     text: m.senderId === EDUAI_SENDER_ID ? m.text : `${m.senderName}: ${m.text}`
                 }));
-        }
-
-        function eduAiTypingBubbleHtml() {
-            return `
-                <div class="chat-msg-row chat-msg-other" id="eduai-typing-indicator">
-                    <div class="chat-bubble chat-bubble-other chat-bubble-ai">
-                        <div class="chat-header-row"><span class="chat-name">EduAI<span class="badge-ai">AI</span></span></div>
-                        <div class="chat-text eduai-typing-dots">EduAI sedang mengetik…</div>
-                    </div>
-                </div>`;
-        }
-
-        function showEduAiTypingIndicator() {
-            eduAiIsTyping = true;
-            const container = document.getElementById('chat-messages-container');
-            if (!container) return;
-            hideEduAiTypingIndicatorDom();
-            container.insertAdjacentHTML('beforeend', eduAiTypingBubbleHtml());
-            container.scrollTop = container.scrollHeight;
-        }
-
-        function hideEduAiTypingIndicatorDom() {
-            const el = document.getElementById('eduai-typing-indicator');
-            if (el) el.remove();
-        }
-
-        function hideEduAiTypingIndicator() {
-            eduAiIsTyping = false;
-            hideEduAiTypingIndicatorDom();
         }
 
         // Bangun blok konteks berisi isi materi/pengumuman + daftar file lampirannya (kalau ada),
@@ -2873,7 +2855,7 @@
             return { text: lines.join('\n'), files };
         }
 
-        async function handleEduAiTrigger(rawText, classId, senderName, triggerMessageId, attachedAnnouncementId) {
+        async function handleEduAiTrigger(rawText, classId, senderName, triggerMessageId, attachedAnnouncementId, triggerTimestamp) {
             const question = rawText.replace(new RegExp(EDUAI_TRIGGER, 'ig'), '').trim() || rawText;
 
             // Mulai/perpanjang sesi memori (reset timer idle), dan catat materi yang baru
@@ -2894,17 +2876,29 @@
                 sessionFiles = results.flatMap(r => r.files || []).slice(0, 10); // batas wajar per pertanyaan
                 if (texts.length > 0) prompt = `${texts.join('\n\n')}\n\nPertanyaan: ${question}`;
             }
-            const history = buildEduAiHistory();
-            showEduAiTypingIndicator();
 
-            // Siapkan dulu id pesan EduAI (belum ditulis ke Firebase) — baru benar-benar ditulis
-            // ("set") begitu potongan teks pertama dari stream tiba, supaya bubble jawaban tidak
-            // sempat muncul kosong. Setelah itu, teksnya di-"update" berulang kali sambil stream
-            // berjalan, sehingga SEMUA orang yang sedang membuka obrolan kelas ini (bukan cuma
-            // pengirim pertanyaan) ikut melihat efek mengetik yang mengalir secara realtime.
+            // "Pesan tempat" bubble EduAI langsung ditulis ke Firebase SEKARANG (bukan menunggu potongan teks
+            // pertama). Timestamp-nya dikunci tepat setelah pesan pemicu, jadi pesan apa pun yang dikirim
+            // sesudahnya (mention EduAI maupun bukan) otomatis berada DI BAWAH bubble ini, walau bubble-nya
+            // masih generating. Bubble ini juga langsung berbentuk balasan (replyTo) ke pesan pemicunya, dan
+            // status "sedang mengetik"-nya kelihatan oleh semua orang yang membuka obrolan, bukan cuma pengirim.
             const aiMsgRef = push(ref(db, `chats/${classId}`));
-            let started = false;
+            const aiMsgId = aiMsgRef.key;
+            const aiBase = {
+                senderId: EDUAI_SENDER_ID, senderName: 'EduAI', senderRole: 'ai',
+                triggerMessageId, replyTo: triggerMessageId
+            };
+            const aiTimestamp = Math.max(Date.now(), (triggerTimestamp || 0) + 1);
+            eduAiActiveStreams.add(aiMsgId);
+            set(aiMsgRef, { ...aiBase, text: '', timestamp: aiTimestamp, generating: true, lastUpdate: Date.now() })
+                .catch(err => console.error('EduAI placeholder error:', err));
+
+            // Riwayat percakapan dibangun SETELAH bubble ditulis, dan bubble yang masih generating (termasuk
+            // milik pertanyaan lain yang sedang berjalan) otomatis dikecualikan di buildEduAiHistory().
+            const history = buildEduAiHistory();
+
             let fullText = '';
+            let started = false;
             let lastFlush = 0;
             const FLUSH_INTERVAL_MS = 150; // jeda antar update Firebase, biar tidak nge-spam tiap huruf
 
@@ -2912,8 +2906,11 @@
                 const now = Date.now();
                 if (!force && now - lastFlush < FLUSH_INTERVAL_MS) return;
                 lastFlush = now;
-                update(ref(db, `chats/${classId}/${aiMsgRef.key}`), { text: fullText });
+                update(aiMsgRef, { text: fullText, lastUpdate: now });
             };
+
+            // Menutup bubble: tulis teks final + lepas status "generating".
+            const finish = (finalText) => update(aiMsgRef, { text: finalText, generating: null, lastUpdate: Date.now() });
 
             try {
                 const res = await fetch('/api/eduai', {
@@ -2924,17 +2921,12 @@
 
                 if (!res.ok || !res.body) {
                     const data = await res.json().catch(() => ({}));
-                    const errText = data.error || 'Maaf, EduAI sedang mengalami gangguan. Coba lagi nanti.';
-                    await set(aiMsgRef, {
-                        text: errText, senderId: EDUAI_SENDER_ID, senderName: 'EduAI',
-                        senderRole: 'ai', timestamp: Date.now(), triggerMessageId
-                    });
+                    await finish(data.error || 'Maaf, EduAI sedang mengalami gangguan. Coba lagi nanti.');
                     return;
                 }
 
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
-                eduAiStreamingMessageId = aiMsgRef.key;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -2942,43 +2934,28 @@
                     const chunk = decoder.decode(value, { stream: true });
                     if (!chunk) continue;
                     fullText += chunk;
-                    if (!started) {
-                        started = true;
-                        hideEduAiTypingIndicator();
-                        await set(aiMsgRef, {
-                            text: fullText, senderId: EDUAI_SENDER_ID, senderName: 'EduAI',
-                            senderRole: 'ai', timestamp: Date.now(), triggerMessageId
-                        });
-                        lastFlush = Date.now();
-                    } else {
-                        flush(false);
-                    }
+                    started = true;
+                    flush(false);
+                    // Kalau pesan pemicunya dihapus (bubble ini ikut ditandai terhapus), hentikan generate.
+                    const cur = chatMessagesCache[aiMsgId];
+                    if (cur && cur.deleted) { try { await reader.cancel(); } catch (e) {} break; }
                 }
 
                 if (!started) {
                     // Stream selesai tapi tidak ada potongan teks sama sekali yang sempat masuk.
-                    fullText = 'Maaf, EduAI tidak bisa memberikan jawaban untuk pertanyaan ini.';
-                    await set(aiMsgRef, {
-                        text: fullText, senderId: EDUAI_SENDER_ID, senderName: 'EduAI',
-                        senderRole: 'ai', timestamp: Date.now(), triggerMessageId
-                    });
+                    await finish('Maaf, EduAI tidak bisa memberikan jawaban untuk pertanyaan ini.');
                 } else {
-                    flush(true); // pastikan versi akhir yang paling lengkap tersimpan
+                    await finish(fullText); // pastikan versi akhir yang paling lengkap tersimpan
                 }
             } catch (err) {
                 console.error('EduAI error:', err);
                 if (!started) {
-                    await set(aiMsgRef, {
-                        text: 'Maaf, EduAI tidak dapat merespons saat ini. Periksa koneksi internet dan coba lagi.',
-                        senderId: EDUAI_SENDER_ID, senderName: 'EduAI', senderRole: 'ai',
-                        timestamp: Date.now(), triggerMessageId
-                    });
+                    await finish('Maaf, EduAI tidak dapat merespons saat ini. Periksa koneksi internet dan coba lagi.');
                 } else {
-                    flush(true);
+                    await finish(fullText);
                 }
             } finally {
-                eduAiStreamingMessageId = null;
-                hideEduAiTypingIndicator();
+                eduAiActiveStreams.delete(aiMsgId);
             }
         }
 
@@ -3317,7 +3294,7 @@
                 cancelChatAttach();
                 input.value = '';
                 if (containsEduAiTrigger(text)) {
-                    handleEduAiTrigger(text, currentViewedClassId, currentUserData.username, newMsgRef.key, attachedAnnIdForAi); // dijalankan async, tidak menunggu (tidak memblokir UI)
+                    handleEduAiTrigger(text, currentViewedClassId, currentUserData.username, newMsgRef.key, attachedAnnIdForAi, payload.timestamp); // dijalankan async, tidak menunggu (tidak memblokir UI)
                 }
             } finally {
                 btn.disabled = false;
