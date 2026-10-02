@@ -677,12 +677,16 @@
 
         /* EduAI (asisten AI di obrolan kelas) */
         .badge-ai {
-            background: linear-gradient(90deg, #8E24AA, #5E35B1); color: #fff; font-size: 10px; font-weight: 800;
-            padding: 2px 8px; border-radius: 99px; margin-left: 7px; letter-spacing: 0.3px;
-            vertical-align: middle; display: inline-block;
+            background: #8E24AA; color: #fff; font-size: 12px; font-weight: 700;
+            padding: 0 10px; height: 24px; line-height: 24px; border-radius: 99px; margin-left: 0;
+            letter-spacing: 0; vertical-align: middle; display: inline-block;
         }
-        .chat-bubble-ai { border: 1.5px solid #8E24AA33; background: #F7F1FB !important; }
+        .chat-bubble-ai-badge-row { margin-top: 5px; }
+        /* Bubble EduAI: sama seperti aplikasi Native (latar ungu muda, border ungu solid, sudut 16px) */
+        .chat-bubble.chat-bubble-ai { background: #F7F1FB !important; border: 1px solid #8E24AA; border-radius: 16px; color: #202124; }
         .chat-bubble-ai .chat-name { color: #6A1B9A !important; }
+        .chat-bubble-ai .chat-text { color: #202124; line-height: 1.4; }
+        .chat-bubble-ai .chat-meta, .chat-bubble-ai .chat-menu-btn { color: #5F6368; }
         .eduai-typing-dots { color: var(--text-muted); font-style: italic; font-size: 13.5px; }
 
         /* Modal Komentar */
@@ -2620,7 +2624,7 @@
             const isGuruSender = m.senderRole === 'guru';
             const isAiSender = m.senderRole === 'ai';
             const guruBadge = isGuruSender ? `<span class="badge-guru">GURU</span>` : '';
-            const aiBadge = isAiSender ? `<span class="badge-ai">AI</span>` : '';
+            const aiBadge = isAiSender ? `<div class="chat-bubble-ai-badge-row"><span class="badge-ai">EDUAI</span></div>` : '';
             const safeName = escapeHtml(m.senderName || 'Pengguna');
             const time = new Date(m.timestamp).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
             const isDeleted = !!m.deleted;
@@ -2692,9 +2696,10 @@
                 <div class="chat-msg-row ${isSelf ? 'chat-msg-self' : 'chat-msg-other'}" data-id="${id}">
                     <div class="chat-bubble ${isSelf ? 'chat-bubble-self' : 'chat-bubble-other'} ${isAiSender ? 'chat-bubble-ai' : ''}">
                         <div class="chat-header-row">
-                            <span class="chat-name">${safeName}${guruBadge}${aiBadge}</span>
+                            <span class="chat-name">${safeName}${guruBadge}</span>
                             ${menuBtn}
                         </div>
+                        ${aiBadge}
                         ${replyHtml}
                         ${bodyHtml}
                         ${attachHtml}
